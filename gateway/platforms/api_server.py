@@ -74,6 +74,22 @@ MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    """Parse boolean config/env values without treating non-empty strings as truthy."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _normalize_chat_content(
     content: Any, *, _max_depth: int = 10, _depth: int = 0,
 ) -> str:
@@ -611,6 +627,13 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
+        self._interrupt_on_sse_disconnect: bool = _parse_bool(
+            extra.get(
+                "interrupt_on_sse_disconnect",
+                os.getenv("API_SERVER_INTERRUPT_ON_SSE_DISCONNECT"),
+            ),
+            default=True,
+        )
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -686,6 +709,32 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         return "*" in self._cors_origins or origin in self._cors_origins
+
+    async def _handle_sse_client_disconnect(self, *, stream_id: str, agent_task, agent_ref=None) -> None:
+        """Handle a dropped SSE client connection.
+
+        Historically a dropped browser/proxy connection was treated as an
+        explicit user cancel. Workspace-style clients can disconnect for benign
+        reasons (navigation, dev reload, proxy churn), so allow deployments to
+        keep the underlying agent run alive and persist its final result.
+        """
+        if not self._interrupt_on_sse_disconnect:
+            logger.info("SSE client disconnected; leaving agent task running %s", stream_id)
+            return
+
+        agent = agent_ref[0] if agent_ref else None
+        if agent is not None:
+            try:
+                agent.interrupt("SSE client disconnected")
+            except Exception:
+                pass
+        if not agent_task.done():
+            agent_task.cancel()
+            try:
+                await agent_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        logger.info("SSE client disconnected; interrupted agent task %s", stream_id)
 
     # ------------------------------------------------------------------
     # Auth helper
@@ -2171,22 +2220,11 @@ class APIServerAdapter(BasePlatformAdapter):
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
-            # Client disconnected mid-stream.  Interrupt the agent so it
-            # stops making LLM API calls at the next loop iteration, then
-            # cancel the asyncio task wrapper.
-            agent = agent_ref[0] if agent_ref else None
-            if agent is not None:
-                try:
-                    agent.interrupt("SSE client disconnected")
-                except Exception:
-                    pass
-            if not agent_task.done():
-                agent_task.cancel()
-                try:
-                    await agent_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            logger.info("SSE client disconnected; interrupted agent task %s", completion_id)
+            await self._handle_sse_client_disconnect(
+                stream_id=completion_id,
+                agent_task=agent_task,
+                agent_ref=agent_ref,
+            )
 
         return response
 
@@ -2593,21 +2631,11 @@ class APIServerAdapter(BasePlatformAdapter):
                         self._response_store.set_conversation(conversation, response_id)
 
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
-            # Client disconnected — interrupt the agent so it stops
-            # making upstream LLM calls, then cancel the task.
-            agent = agent_ref[0] if agent_ref else None
-            if agent is not None:
-                try:
-                    agent.interrupt("SSE client disconnected")
-                except Exception:
-                    pass
-            if not agent_task.done():
-                agent_task.cancel()
-                try:
-                    await agent_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            logger.info("SSE client disconnected; interrupted agent task %s", response_id)
+            await self._handle_sse_client_disconnect(
+                stream_id=response_id,
+                agent_task=agent_task,
+                agent_ref=agent_ref,
+            )
 
         return response
 

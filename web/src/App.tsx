@@ -7,6 +7,7 @@ import {
   FileText,
   KeyRound,
   MessageSquare,
+  Network,
   Package,
   Settings,
   Puzzle,
@@ -33,6 +34,8 @@ import LogsPage from "@/pages/LogsPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import CronPage from "@/pages/CronPage";
 import SkillsPage from "@/pages/SkillsPage";
+import ChatPage from "@/pages/ChatPage";
+import Swarm2Page from "@/pages/Swarm2Page";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -46,6 +49,7 @@ import { useTheme } from "@/themes";
 const BUILTIN_ROUTES: Record<string, React.ComponentType> = {
   "/": StatusPage,
   "/sessions": SessionsPage,
+  "/swarm2": Swarm2Page,
   "/analytics": AnalyticsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
@@ -61,6 +65,11 @@ const BUILTIN_NAV: NavItem[] = [
     labelKey: "sessions",
     label: "Sessions",
     icon: MessageSquare,
+  },
+  {
+    path: "/swarm2",
+    label: "Swarm2",
+    icon: Network,
   },
   {
     path: "/analytics",

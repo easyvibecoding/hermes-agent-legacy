@@ -10933,21 +10933,24 @@ def main(
     # Handle query shorthand
     query = query or q
     
-    # Parse toolsets - handle both string and tuple/list inputs
-    # Default to hermes-cli toolset which includes cronjob management tools
+    # Parse toolsets - handle both string and tuple/list inputs.
+    # Important: an explicitly-empty config list (toolsets: []) should still
+    # fall back to platform_toolsets.cli so profile-scoped MCP-only setups work.
     toolsets_list = None
-    if toolsets:
+    explicit_toolsets = bool(toolsets)
+    if explicit_toolsets:
         if isinstance(toolsets, str):
-            toolsets_list = [t.strip() for t in toolsets.split(",")]
+            toolsets_list = [t.strip() for t in toolsets.split(",") if t.strip()]
         elif isinstance(toolsets, (list, tuple)):
             # Fire may pass multiple --toolsets as a tuple
             toolsets_list = []
             for t in toolsets:
                 if isinstance(t, str):
-                    toolsets_list.extend([x.strip() for x in t.split(",")])
-                else:
+                    toolsets_list.extend([x.strip() for x in t.split(",") if x.strip()])
+                elif t is not None:
                     toolsets_list.append(str(t))
-    else:
+        explicit_toolsets = bool(toolsets_list)
+    if not explicit_toolsets:
         # Use the shared resolver so MCP servers are included at runtime
         from hermes_cli.tools_config import _get_platform_tools
         toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))

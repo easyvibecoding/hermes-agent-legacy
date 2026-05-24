@@ -96,6 +96,12 @@ TOOLSETS = {
         "tools": ["terminal", "process"],
         "includes": []
     },
+
+    "git_basics": {
+        "description": "Minimal native git repository inspection tools",
+        "tools": ["git_status", "git_diff", "git_log"],
+        "includes": []
+    },
     
     "moa": {
         "description": "Advanced reasoning and problem-solving tools",

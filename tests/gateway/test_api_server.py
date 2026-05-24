@@ -240,6 +240,44 @@ class TestAdapterInit:
             "http://127.0.0.1:3000",
         )
 
+    def test_interrupts_on_sse_disconnect_by_default(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        assert adapter._interrupt_on_sse_disconnect is True
+
+    def test_can_keep_agent_running_after_sse_disconnect_from_config(self):
+        config = PlatformConfig(enabled=True, extra={"interrupt_on_sse_disconnect": False})
+        adapter = APIServerAdapter(config)
+        assert adapter._interrupt_on_sse_disconnect is False
+
+    def test_can_keep_agent_running_after_sse_disconnect_from_env(self, monkeypatch):
+        monkeypatch.setenv("API_SERVER_INTERRUPT_ON_SSE_DISCONNECT", "false")
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        assert adapter._interrupt_on_sse_disconnect is False
+
+    def test_sse_disconnect_can_leave_agent_task_running(self):
+        async def run_case():
+            adapter = APIServerAdapter(
+                PlatformConfig(enabled=True, extra={"interrupt_on_sse_disconnect": False})
+            )
+            agent = MagicMock()
+            agent_task = asyncio.create_task(asyncio.sleep(10))
+
+            try:
+                await adapter._handle_sse_client_disconnect(
+                    stream_id="chatcmpl-test",
+                    agent_task=agent_task,
+                    agent_ref=[agent],
+                )
+
+                agent.interrupt.assert_not_called()
+                assert not agent_task.done()
+            finally:
+                agent_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await agent_task
+
+        asyncio.run(run_case())
+
 
 # ---------------------------------------------------------------------------
 # Auth checking
