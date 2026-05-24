@@ -334,6 +334,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # to https://dashscope-intl.aliyuncs.com/compatible-mode/v1 (OpenAI-compat)
     # or https://dashscope-intl.aliyuncs.com/apps/anthropic (Anthropic-compat).
     "alibaba": [
+        "qwen3.7-max",
         "kimi-k2.5",
         "qwen3.5-plus",
         "qwen3-coder-plus",

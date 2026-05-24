@@ -642,6 +642,12 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
+        # Live/cached runtime snapshots keyed by requested or effective session id.
+        # This lets web clients render the same context meter semantics as the TUI
+        # (context_compressor.last_prompt_tokens / context_length) instead of
+        # reverse-engineering usage from persisted session rows.
+        self._active_session_agents: Dict[str, Any] = {}
+        self._session_runtime_snapshots: Dict[str, Dict[str, Any]] = {}
         self._session_db: Optional[SessionDB] = None
         self._memory_store: Optional[MemoryStore] = None
 
@@ -962,6 +968,77 @@ class APIServerAdapter(BasePlatformAdapter):
     # HTTP Handlers
     # ------------------------------------------------------------------
 
+    def _build_session_runtime_snapshot(
+        self,
+        requested_session_id: str,
+        agent: Any,
+    ) -> Dict[str, Any]:
+        effective_session_id = str(
+            getattr(agent, "session_id", None) or requested_session_id or "",
+        ).strip()
+        model = str(getattr(agent, "model", "") or "").strip()
+        compressor = getattr(agent, "context_compressor", None)
+        context_tokens = int(
+            getattr(compressor, "last_prompt_tokens", 0)
+            or getattr(agent, "session_prompt_tokens", 0)
+            or 0,
+        )
+        context_length = int(
+            getattr(compressor, "context_length", 0)
+            or getattr(agent, "context_length", 0)
+            or 0,
+        )
+        prompt_tokens = int(getattr(agent, "session_prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(agent, "session_completion_tokens", 0) or 0)
+        total_tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
+        if context_length > 0 and context_tokens > 0:
+            context_percent = round(min(100.0, (context_tokens / context_length) * 100.0), 1)
+        else:
+            context_percent = 0.0
+        return {
+            "requested_session_id": requested_session_id,
+            "effective_session_id": effective_session_id,
+            "session_id": effective_session_id or requested_session_id,
+            "model": model,
+            "context_tokens": context_tokens,
+            "context_length": context_length,
+            "context_percent": context_percent,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "updated_at": time.time(),
+        }
+
+    def _store_session_runtime_snapshot(
+        self,
+        requested_session_id: str,
+        agent: Any,
+    ) -> Dict[str, Any]:
+        snapshot = self._build_session_runtime_snapshot(requested_session_id, agent)
+        requested = str(requested_session_id or "").strip()
+        effective = str(snapshot.get("effective_session_id") or "").strip()
+        if requested:
+            self._session_runtime_snapshots[requested] = dict(snapshot)
+        if effective:
+            self._session_runtime_snapshots[effective] = dict(snapshot)
+        return snapshot
+
+    def _bind_active_session_agent(self, requested_session_id: str, agent: Any) -> None:
+        requested = str(requested_session_id or "").strip()
+        effective = str(getattr(agent, "session_id", None) or "").strip()
+        if requested:
+            self._active_session_agents[requested] = agent
+        if effective:
+            self._active_session_agents[effective] = agent
+        self._store_session_runtime_snapshot(requested_session_id, agent)
+
+    def _unbind_active_session_agent(self, requested_session_id: str, agent: Any) -> None:
+        requested = str(requested_session_id or "").strip()
+        effective = str(getattr(agent, "session_id", None) or "").strip()
+        for key in filter(None, {requested, effective}):
+            if self._active_session_agents.get(key) is agent:
+                self._active_session_agents.pop(key, None)
+
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
@@ -1101,6 +1178,20 @@ class APIServerAdapter(BasePlatformAdapter):
             db.ensure_session(session_id, source="web")
         items = db.get_messages(session_id)
         return web.json_response({"items": items, "total": len(items)})
+
+    async def _handle_get_session_runtime(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/{session_id}/runtime — live/cached TUI-style usage snapshot."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        agent = self._active_session_agents.get(session_id)
+        if agent is not None:
+            return web.json_response(self._store_session_runtime_snapshot(session_id, agent))
+        snapshot = self._session_runtime_snapshots.get(session_id)
+        if snapshot is None:
+            return web.json_response({"error": "Session runtime snapshot not found"}, status=404)
+        return web.json_response(snapshot)
 
     async def _handle_update_session(self, request: "web.Request") -> "web.Response":
         """PATCH /api/sessions/{session_id} — update a session."""
@@ -3250,17 +3341,23 @@ class APIServerAdapter(BasePlatformAdapter):
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
-            result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-                task_id="default",
-            )
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
-            return result, usage
+            self._bind_active_session_agent(session_id or "", agent)
+            try:
+                result = agent.run_conversation(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    task_id="default",
+                )
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                self._store_session_runtime_snapshot(session_id or "", agent)
+                return result, usage
+            finally:
+                self._store_session_runtime_snapshot(session_id or "", agent)
+                self._unbind_active_session_agent(session_id or "", agent)
 
         return await loop.run_in_executor(None, _run)
 
@@ -3572,6 +3669,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/api/sessions/search", self._handle_search_sessions)
             self._app.router.add_get("/api/sessions/{session_id}", self._handle_get_session)
             self._app.router.add_get("/api/sessions/{session_id}/messages", self._handle_get_session_messages)
+            self._app.router.add_get("/api/sessions/{session_id}/runtime", self._handle_get_session_runtime)
             self._app.router.add_patch("/api/sessions/{session_id}", self._handle_update_session)
             self._app.router.add_delete("/api/sessions/{session_id}", self._handle_delete_session)
             self._app.router.add_post("/api/sessions/{session_id}/fork", self._handle_fork_session)

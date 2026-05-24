@@ -436,6 +436,72 @@ class TestHealthDetailedEndpoint:
                 assert isinstance(data["pid"], int)
                 assert "updated_at" in data
 
+
+class TestSessionRuntimeEndpoint:
+    @pytest.mark.asyncio
+    async def test_returns_cached_snapshot(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_get("/api/sessions/{session_id}/runtime", adapter._handle_get_session_runtime)
+        adapter._session_runtime_snapshots["sess_cached"] = {
+            "requested_session_id": "sess_cached",
+            "effective_session_id": "sess_cached",
+            "session_id": "sess_cached",
+            "model": "gpt-5.4",
+            "context_tokens": 1234,
+            "context_length": 512000,
+            "context_percent": 0.2,
+            "prompt_tokens": 1234,
+            "completion_tokens": 56,
+            "total_tokens": 1290,
+            "updated_at": 1.0,
+        }
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/api/sessions/sess_cached/runtime")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["session_id"] == "sess_cached"
+            assert data["context_tokens"] == 1234
+            assert data["context_length"] == 512000
+
+    @pytest.mark.asyncio
+    async def test_prefers_live_agent_snapshot(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_get("/api/sessions/{session_id}/runtime", adapter._handle_get_session_runtime)
+
+        class DummyCompressor:
+            last_prompt_tokens = 4321
+            context_length = 512000
+
+        class DummyAgent:
+            session_id = "sess_live"
+            model = "gpt-5.4"
+            context_compressor = DummyCompressor()
+            session_prompt_tokens = 4500
+            session_completion_tokens = 120
+            session_total_tokens = 4620
+
+        adapter._active_session_agents["sess_live"] = DummyAgent()
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/api/sessions/sess_live/runtime")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["session_id"] == "sess_live"
+            assert data["context_tokens"] == 4321
+            assert data["context_length"] == 512000
+            assert data["prompt_tokens"] == 4500
+            assert data["completion_tokens"] == 120
+            assert data["total_tokens"] == 4620
+            assert data["context_percent"] > 0
+
+    @pytest.mark.asyncio
+    async def test_returns_404_without_live_or_cached_snapshot(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_get("/api/sessions/{session_id}/runtime", adapter._handle_get_session_runtime)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/api/sessions/missing/runtime")
+            assert resp.status == 404
+
     @pytest.mark.asyncio
     async def test_health_detailed_no_runtime_status(self, adapter):
         """When gateway_state.json is missing, fields are None."""
