@@ -10,6 +10,10 @@ The API server exposes hermes-agent as an OpenAI-compatible HTTP endpoint. Any f
 
 Your agent handles requests with its full toolset (terminal, file operations, web search, memory, skills) and returns the final response. When streaming, tool progress indicators appear inline so frontends can show what the agent is doing.
 
+:::tip One backend covers models + tools
+Hermes itself needs a configured provider and tool backends for the API server to be useful. A [Nous Portal](/docs/user-guide/features/tool-gateway) subscription handles both — 300+ models plus web/image/TTS/browser via the Tool Gateway. Run `hermes setup --portal` once before starting the API server and frontends like Open WebUI or LobeChat get a fully tool-equipped backend.
+:::
+
 ## Quick Start
 
 ### 1. Enable the API server
@@ -194,6 +198,29 @@ Delete a stored response.
 
 Lists the agent as an available model. The advertised model name defaults to the [profile](/docs/user-guide/profiles) name (or `hermes-agent` for the default profile). Required by most frontends for model discovery.
 
+### GET /v1/capabilities
+
+Returns a machine-readable description of the API server's stable surface for external UIs, orchestrators, and plugin bridges.
+
+```json
+{
+  "object": "hermes.api_server.capabilities",
+  "platform": "hermes-agent",
+  "model": "hermes-agent",
+  "auth": {"type": "bearer", "required": true},
+  "features": {
+    "chat_completions": true,
+    "responses_api": true,
+    "run_submission": true,
+    "run_status": true,
+    "run_events_sse": true,
+    "run_stop": true
+  }
+}
+```
+
+Use this endpoint when integrating dashboards, browser UIs, or control planes so they can discover whether the running Hermes version supports runs, streaming, cancellation, and session continuity without depending on private Python internals.
+
 ### GET /health
 
 Health check. Returns `{"status": "ok"}`. Also available at **GET /v1/health** for OpenAI-compatible clients that expect the `/v1/` prefix.
@@ -210,9 +237,40 @@ In addition to `/v1/chat/completions` and `/v1/responses`, the server exposes a 
 
 Create a new agent run. Returns a `run_id` that can be used to subscribe to progress events.
 
+```json
+{
+  "run_id": "run_abc123",
+  "status": "started"
+}
+```
+
+Runs accept a simple `input` string and optional `session_id`, `instructions`, `conversation_history`, or `previous_response_id`. When `session_id` is provided, Hermes surfaces it in the run status so external UIs can correlate runs with their own conversation IDs.
+
+### GET /v1/runs/\{run_id\}
+
+Poll the current run state. This is useful for dashboards that need status without holding an SSE connection open, or for UIs that reconnect after navigation.
+
+```json
+{
+  "object": "hermes.run",
+  "run_id": "run_abc123",
+  "status": "completed",
+  "session_id": "space-session",
+  "model": "hermes-agent",
+  "output": "Done.",
+  "usage": {"input_tokens": 50, "output_tokens": 200, "total_tokens": 250}
+}
+```
+
+Statuses are retained briefly after terminal states (`completed`, `failed`, or `cancelled`) for polling and UI reconciliation.
+
 ### GET /v1/runs/\{run_id\}/events
 
 Server-Sent Events stream of the run's tool-call progress, token deltas, and lifecycle events. Designed for dashboards and thick clients that want to attach/detach without losing state.
+
+### POST /v1/runs/\{run_id\}/stop
+
+Interrupt a running agent turn. The endpoint returns immediately with `{"status": "stopping"}` while Hermes asks the active agent to stop at the next safe interruption point.
 
 ## Jobs API (background scheduled work)
 
@@ -344,14 +402,19 @@ To give multiple users their own isolated Hermes instance (separate config, memo
 hermes profile create alice
 hermes profile create bob
 
-# Configure each profile's API server on a different port
-hermes -p alice config set API_SERVER_ENABLED true
-hermes -p alice config set API_SERVER_PORT 8643
-hermes -p alice config set API_SERVER_KEY alice-secret
+# Configure each profile's API server on a different port. API_SERVER_* are env
+# vars (not config.yaml keys), so write them to each profile's .env:
+cat >> ~/.hermes/profiles/alice/.env <<EOF
+API_SERVER_ENABLED=true
+API_SERVER_PORT=8643
+API_SERVER_KEY=alice-secret
+EOF
 
-hermes -p bob config set API_SERVER_ENABLED true
-hermes -p bob config set API_SERVER_PORT 8644
-hermes -p bob config set API_SERVER_KEY bob-secret
+cat >> ~/.hermes/profiles/bob/.env <<EOF
+API_SERVER_ENABLED=true
+API_SERVER_PORT=8644
+API_SERVER_KEY=bob-secret
+EOF
 
 # Start each profile's gateway
 hermes -p alice gateway &
